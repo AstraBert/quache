@@ -2,6 +2,7 @@ package core
 
 import (
 	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,11 @@ func NewKVStoreFromDisk(numShards int, directory string) (*KVStore, error) {
 		}
 		bDataS := string(bData)
 		lines := strings.Split(bDataS, "\n")
-		integrityHash := []byte(lines[len(lines)-1])
+		integrityHashS := lines[len(lines)-1]
+		integrityHash, err := hex.DecodeString(integrityHashS)
+		if err != nil {
+			return nil, NewUnloadableShardError(i, err.Error())
+		}
 		mapData := []byte(strings.Join(lines[:len(lines)-1], "\n"))
 		actualHash := md5.Sum(mapData)
 		if !slices.Equal(actualHash[:], integrityHash) {
@@ -158,7 +163,8 @@ func (s *Shard) Flush(fileName string) error {
 		return err
 	}
 	hash := md5.Sum(data)
-	toWrite := append(data, append([]byte("\n"), hash[:]...)...)
+	encoded := hex.EncodeToString(hash[:])
+	toWrite := append(data, append([]byte("\n"), []byte(encoded)...)...)
 	return os.WriteFile(fileName, toWrite, 0644)
 }
 
