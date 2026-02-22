@@ -24,14 +24,14 @@ pub struct Shard {
 pub struct KVStore {
     shards: Vec<Shard>,
     directory: String,
-    shard_dimensions: HashMap<usize, usize>,
+    shard_dimensions: Arc<RwLock<HashMap<usize, usize>>>,
 }
 
 impl ShardEntry {
     pub fn new(value: serde_json::Value, ttl: Option<f64>) -> Self {
         let actual_ttl = match ttl {
             None => -1_f64,
-            Some(f) => f,
+            Some(f) => f * 1000_f64,
         };
         let timestamp = time::SystemTime::now()
             .duration_since(time::UNIX_EPOCH)
@@ -60,9 +60,6 @@ impl Shard {
 
     pub fn flush(&self, file_name: String) -> Result<()> {
         let data = self.data.read().map_err(|e| anyhow!(e.to_string()))?;
-        if data.len() == 0 {
-            return Ok(());
-        }
         let to_write = serde_json::to_string(&*data)?;
         let integrity_hash = md5::compute(&to_write.clone().into_bytes());
         let integrity_hash_string: String = integrity_hash
@@ -117,7 +114,7 @@ impl KVStore {
         Ok(Self {
             directory,
             shards,
-            shard_dimensions: HashMap::new(),
+            shard_dimensions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -130,6 +127,7 @@ impl KVStore {
         while i < num_shards {
             let file_path = format!("{}/shard-{:?}", &directory.trim_end_matches("/"), i);
             if fs::exists(&file_path)? {
+                println!("Loading shard {:?} from file", i);
                 let content = fs::read_to_string(&file_path)?;
                 let lines: Vec<&str> = content.split("\n").collect();
                 let integrity_hash_str = lines[lines.len() - 1].to_string();
@@ -148,8 +146,11 @@ impl KVStore {
                 }
                 let data: HashMap<String, ShardEntry> = serde_json::from_str(&raw_data)?;
                 shards.push(Shard::new_with_data(data));
-                i += 1;
             } else {
+                println!(
+                    "File for shard {:?} not found, initializing an empty shard...",
+                    i
+                );
                 shards.push(Shard::new());
             }
             i += 1;
@@ -157,7 +158,7 @@ impl KVStore {
         Ok(Self {
             shards,
             directory,
-            shard_dimensions: HashMap::new(),
+            shard_dimensions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -206,18 +207,28 @@ impl KVStore {
         let mut i = 0;
         while i < self.shards.len() {
             let shard_length = self.shards[i].get_length()?;
-            let stored_shard_length: usize = match self.shard_dimensions.get(&i) {
-                None => 0,
-                Some(s) => *s,
+            let stored_shard_length: usize = {
+                let dims = self
+                    .shard_dimensions
+                    .read()
+                    .map_err(|e| anyhow!(e.to_string()))?;
+                dims.get(&i).copied().unwrap_or(0)
             };
             if shard_length == stored_shard_length {
                 // no changes, do not flush
+                i += 1;
                 continue;
             }
-            self.shard_dimensions
-                .entry(i)
-                .and_modify(|v| *v = shard_length)
-                .or_insert(shard_length);
+            {
+                let mut dims = self
+                    .shard_dimensions
+                    .write()
+                    .map_err(|e| anyhow!(e.to_string()))?;
+                dims.entry(i)
+                    .and_modify(|v| *v = shard_length)
+                    .or_insert(shard_length);
+            }
+
             let file_path = format!("{}/shard-{:?}", &self.directory.trim_end_matches("/"), i);
             self.shards[i].flush(file_path)?;
             i += 1;

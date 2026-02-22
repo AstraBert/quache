@@ -155,9 +155,6 @@ func (s *Shard) Evict() {
 func (s *Shard) Flush(fileName string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.Data) == 0 {
-		return nil
-	}
 	data, err := json.Marshal(s.Data)
 	if err != nil {
 		return err
