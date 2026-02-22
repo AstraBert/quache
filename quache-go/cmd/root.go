@@ -48,7 +48,7 @@ var rootCmd = &cobra.Command{
 				fmt.Println("Cannot load the KV store from the specified directory because it does not exist")
 				os.Exit(1)
 			}
-			os.Mkdir(directory, 0775)
+			os.MkdirAll(directory, 0775)
 		}
 		var kvStore *core.KVStore
 		if load {
