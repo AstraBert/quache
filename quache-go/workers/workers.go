@@ -10,6 +10,8 @@ import (
 )
 
 func ToDiskWorker(kvStore *core.KVStore, flushingInterval int, done <-chan os.Signal, ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(flushingInterval) * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-done:
@@ -18,17 +20,18 @@ func ToDiskWorker(kvStore *core.KVStore, flushingInterval int, done <-chan os.Si
 		case <-ctx.Done():
 			log.Println("Stopping disk flushing worker...")
 			return
-		default:
+		case <-ticker.C:
 			err := kvStore.ToDisk()
 			if err != nil {
 				log.Printf("\x1b[1;31mERROR\x1b[1;m37%sError while flushing to disk: \n", err.Error())
 			}
-			time.Sleep(time.Duration(flushingInterval * 1000))
 		}
 	}
 }
 
 func CleanupWorker(kvStore *core.KVStore, cleanupInterval int, done <-chan os.Signal, ctx context.Context) {
+	ticker := time.NewTicker(time.Duration(cleanupInterval) * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-done:
@@ -37,9 +40,8 @@ func CleanupWorker(kvStore *core.KVStore, cleanupInterval int, done <-chan os.Si
 		case <-ctx.Done():
 			log.Println("Stopping cleanup worker...")
 			return
-		default:
+		case <-ticker.C:
 			kvStore.Cleanup()
-			time.Sleep(time.Duration(cleanupInterval * 1000))
 		}
 	}
 }

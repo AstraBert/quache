@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/AstraBert/quache/quache-go/core"
 )
@@ -20,7 +21,9 @@ type GetResponse struct {
 
 func handlePost(kvStore *core.KVStore, w http.ResponseWriter, r *http.Request) {
 	var req SetRequest
-	err := json.NewDecoder(r.Body).Decode(&req)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(&req)
 	if err != nil {
 		http.Error(
 			w,
@@ -35,7 +38,7 @@ func handlePost(kvStore *core.KVStore, w http.ResponseWriter, r *http.Request) {
 
 func handleGet(kvStore *core.KVStore, w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		http.Error(
 			w,
 			"Provided key was empty, please provide a non-empty key",
