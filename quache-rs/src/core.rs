@@ -245,3 +245,163 @@ impl KVStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cleanup_test_file(file_name: String) {
+        if fs::exists(&file_name).expect("Should be able to check file existence") {
+            fs::remove_file(file_name).expect("Should be able to remove file");
+        }
+    }
+
+    #[test]
+    fn test_shard_entry_init() {
+        let shard_entry = ShardEntry::new(serde_json::Value::from("hello"), Some(0.001));
+        assert_eq!(shard_entry.value, serde_json::Value::from("hello"));
+        assert_eq!(shard_entry.ttl, 1_f64);
+        let current_time = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis();
+        assert!(current_time >= shard_entry.timestamp);
+    }
+
+    #[test]
+    fn test_shard_empty_init() {
+        let shard = Shard::new();
+        let data = shard.data.read().expect("Should be able to read data");
+        assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn test_shard_with_data_init() {
+        let mut init_data: HashMap<String, ShardEntry> = HashMap::new();
+        init_data.insert(
+            "hello".to_string(),
+            ShardEntry::new(serde_json::Value::from(1), None),
+        );
+        init_data.insert(
+            "hey".to_string(),
+            ShardEntry::new(serde_json::Value::from(2), Some(2_f64)),
+        );
+        let shard = Shard::new_with_data(init_data);
+        let data = shard.data.read().expect("Should be able to read data");
+        assert_eq!(data.len(), 2);
+        let hello_entry = data
+            .get("hello")
+            .expect("Should be able to retrieve 'hello' key");
+        let hey_entry = data
+            .get("hey")
+            .expect("Should be able to retrieve 'hey' key");
+        assert_eq!(hello_entry.value, serde_json::Value::from(1));
+        assert_eq!(hey_entry.value, serde_json::Value::from(2));
+        assert_eq!(hello_entry.ttl, -1_f64);
+        assert_eq!(hey_entry.ttl, 2000_f64);
+    }
+
+    #[test]
+    fn test_shard_get_length() {
+        let mut init_data: HashMap<String, ShardEntry> = HashMap::new();
+        init_data.insert(
+            "hello".to_string(),
+            ShardEntry::new(serde_json::Value::from(1), None),
+        );
+        init_data.insert(
+            "hey".to_string(),
+            ShardEntry::new(serde_json::Value::from(2), Some(2_f64)),
+        );
+        let shard = Shard::new_with_data(init_data);
+        assert_eq!(
+            shard
+                .get_length()
+                .expect("should be able to retrieve length"),
+            2
+        );
+        let shard_1 = Shard::new();
+        assert_eq!(
+            shard_1
+                .get_length()
+                .expect("should be able to retrieve length"),
+            0
+        );
+    }
+
+    #[test]
+    fn test_shard_evict() {
+        let mut init_data: HashMap<String, ShardEntry> = HashMap::new();
+        init_data.insert(
+            "hello".to_string(),
+            ShardEntry::new(serde_json::Value::from(1), None),
+        );
+        init_data.insert(
+            "hey".to_string(),
+            ShardEntry::new(serde_json::Value::from(2), Some(0.001)), // 1 millisecond
+        );
+        init_data.insert(
+            "bye".to_string(),
+            ShardEntry::new(serde_json::Value::from(3), Some(2_f64)), // 2 seconds
+        );
+        let shard = Shard::new_with_data(init_data);
+        assert_eq!(shard.get_length().expect("Should be able to get length"), 3);
+        std::thread::sleep(time::Duration::from_millis(5)); // this should discard the 'hey' entry
+        shard
+            .evict()
+            .expect("Should be able to evict expired entries");
+        assert_eq!(shard.get_length().expect("Should be able to get length"), 2);
+        let data = shard.data.read().expect("Should be able to read data");
+        assert_eq!(data.len(), 2);
+        let hello_entry = data.get("hello");
+        assert!(hello_entry.is_some());
+        let bye_entry = data.get("bye");
+        assert!(bye_entry.is_some());
+        let hey_entry = data.get("hey");
+        assert!(hey_entry.is_none());
+    }
+
+    #[test]
+    fn test_shard_flush() {
+        let mut init_data: HashMap<String, ShardEntry> = HashMap::new();
+        init_data.insert(
+            "hello".to_string(),
+            ShardEntry::new(serde_json::Value::from(1), None),
+        );
+        init_data.insert(
+            "hey".to_string(),
+            ShardEntry::new(serde_json::Value::from(2), None),
+        );
+        let shard = Shard::new_with_data(init_data);
+        shard
+            .flush("shard-0-test".to_string())
+            .expect("Should be able to flush to file");
+
+        assert!(fs::exists("shard-0-test").expect("Should be able to check file existence"));
+        let content = fs::read_to_string("shard-0-test").expect("Should be able to read file path");
+        let lines: Vec<&str> = content.split("\n").collect();
+        let integrity_hash_str = lines[lines.len() - 1].to_string();
+        let raw_data = lines[0..lines.len() - 1].join("\n");
+        let computed_hash = md5::compute(&raw_data.clone().into_bytes());
+        let computed_hash_string: String = computed_hash
+            .to_vec()
+            .iter()
+            .map(|c| c.to_string())
+            .collect();
+        assert_eq!(integrity_hash_str, computed_hash_string);
+        let data: HashMap<String, ShardEntry> =
+            serde_json::from_str(&raw_data).expect("Should be able to deserialize data");
+        assert_eq!(data.len(), 2);
+        let hello_entry = data
+            .get("hello")
+            .expect("Should be able to retrieve 'hello' key");
+        let hey_entry = data
+            .get("hey")
+            .expect("Should be able to retrieve 'hey' key");
+        assert_eq!(hello_entry.value, serde_json::Value::from(1));
+        assert_eq!(hey_entry.value, serde_json::Value::from(2));
+        assert_eq!(hello_entry.ttl, -1_f64);
+        assert_eq!(hey_entry.ttl, -1_f64);
+
+        cleanup_test_file("shard-0-test".to_string())
+    }
+}

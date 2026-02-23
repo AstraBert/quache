@@ -1,0 +1,3 @@
+build = "go build -o quache ."
+test = "go test -v -race ./..."
+bench = "go test -v -run='^$' -bench=. ./..."
