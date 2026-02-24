@@ -122,3 +122,95 @@ impl KVStoreServer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::usize;
+
+    use super::*;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::Service;
+
+    fn cleanup_test_directory(directory_name: String) {
+        if std::fs::exists(&directory_name).expect("Should be able to check directory existence") {
+            std::fs::remove_dir_all(directory_name)
+                .expect("Should be able to remove directory content");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kv_endpoints() {
+        let kv_store =
+            KVStore::new(3, ".quache-server/".to_string()).expect("Should be able to create test");
+
+        let state: AppState = AppState { kv_store };
+        let mut app = Router::new()
+            .route("/kv", post(handle_post))
+            .route("/kv/{key}", get(handle_get).delete(handle_delete))
+            .with_state(state);
+        let request_body = serde_json::to_string(&PutRequest {
+            key: "hello".to_string(),
+            value: serde_json::Value::from(1),
+            ttl: None,
+        })
+        .unwrap();
+        let response = app
+            .call(
+                Request::builder()
+                    .uri("/kv")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let get_response = app
+            .call(
+                Request::builder()
+                    .uri("/kv/hello")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let bytes = to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let get_response_json: GetResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(get_response_json.value, serde_json::Value::from(1));
+
+        let delete_response = app
+            .call(
+                Request::builder()
+                    .uri("/kv/hello")
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let get_deleted_response = app
+            .call(
+                Request::builder()
+                    .uri("/kv/hello")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_deleted_response.status(), StatusCode::NOT_FOUND);
+
+        cleanup_test_directory(".quache-server/".to_string());
+    }
+}

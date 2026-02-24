@@ -248,11 +248,19 @@ impl KVStore {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     fn cleanup_test_file(file_name: String) {
         if fs::exists(&file_name).expect("Should be able to check file existence") {
             fs::remove_file(file_name).expect("Should be able to remove file");
+        }
+    }
+
+    fn cleanup_test_directory(directory_name: String) {
+        if fs::exists(&directory_name).expect("Should be able to check directory existence") {
+            fs::remove_dir_all(directory_name).expect("Should be able to remove directory content");
         }
     }
 
@@ -403,5 +411,258 @@ mod tests {
         assert_eq!(hey_entry.ttl, -1_f64);
 
         cleanup_test_file("shard-0-test".to_string())
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_init() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        assert!(fs::exists(".quache-test/").expect("Should be able to check directory existence"));
+        let shard_dimensions = kv_store
+            .shard_dimensions
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert_eq!(shard_dimensions.len(), 0);
+        assert_eq!(kv_store.shards.len(), 3);
+
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_find_shard() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        let shard_num_0 = kv_store.find_shard("notthekindofthingyouwouldfind");
+        assert_eq!(shard_num_0, 0);
+        let shard_num_1 = kv_store.find_shard("thisisaverylongkey");
+        assert_eq!(shard_num_1, 1);
+        let shard_num_2 = kv_store.find_shard("this is an interesting key");
+        assert_eq!(shard_num_2, 2);
+
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_put() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        kv_store
+            .put("hey".to_string(), serde_json::Value::from(1), None)
+            .expect("Should be able to call .put without errors"); // goes to shard-2
+        assert_eq!(
+            kv_store.shards[2]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        assert_eq!(
+            kv_store.shards[1]
+                .get_length()
+                .expect("Should be able to get length"),
+            0
+        );
+        assert_eq!(
+            kv_store.shards[0]
+                .get_length()
+                .expect("Should be able to get length"),
+            0
+        );
+        let data = kv_store.shards[2]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data.contains_key("hey"));
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_get() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        kv_store
+            .put("hey".to_string(), serde_json::Value::from(1), None)
+            .expect("Should be able to call .put without errors"); // goes to shard-2
+        let result = kv_store
+            .get("hey".to_string())
+            .expect("Should be able to get the 'hey' key");
+        assert_eq!(result, serde_json::Value::from(1));
+        let notfound = kv_store.get("hello".to_string());
+        assert_eq!(
+            notfound.is_err_and(|e| e.to_string().contains("not found")),
+            true
+        );
+
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_delete() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        kv_store
+            .put("hello".to_string(), serde_json::Value::from(1), None)
+            .expect("Should be able to call .put without errors"); // goes to shard-2
+        kv_store // delete existing key
+            .delete("hello".to_string())
+            .expect("Should be able to delete key");
+        let notfound = kv_store.get("hello".to_string());
+        assert_eq!(
+            notfound.is_err_and(|e| e.to_string().contains("not found")),
+            true
+        );
+        let delete_not_exist = kv_store.delete("hello".to_string());
+        assert!(delete_not_exist.is_ok()); // assert that delete with non-existing key is just a no-op
+
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_cleanup() {
+        let kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        kv_store
+            .put("hey".to_string(), serde_json::Value::from(1), None)
+            .expect("Should be able to call .put without errors"); // goes to shard-2
+        kv_store
+            .put(
+                "thisisaverylongkey".to_string(),
+                serde_json::Value::from(1),
+                Some(1_f64), // 1 second ttl
+            )
+            .expect("Should be able to call .put without errors"); // goes to shard-1
+        kv_store
+            .put(
+                "notthekindofthingyouwouldfind".to_string(),
+                serde_json::Value::from(3),
+                Some(0.001), // 1 millisecond ttl
+            )
+            .expect("Should be able to call .put without errors"); // goes to shard-0
+        std::thread::sleep(time::Duration::from_millis(5)); // should be enough to evict key from shard-0
+        kv_store
+            .cleanup()
+            .expect("Should be able to clean up the KV store");
+
+        assert_eq!(
+            kv_store.shards[2]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        assert_eq!(
+            kv_store.shards[1]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        assert_eq!(
+            kv_store.shards[0]
+                .get_length()
+                .expect("Should be able to get length"),
+            0
+        );
+        let data_2 = kv_store.shards[2]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data_2.contains_key("hey"));
+        let data_1 = kv_store.shards[1]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data_1.contains_key("thisisaverylongkey"));
+
+        let data_0 = kv_store.shards[0]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(!data_0.contains_key("notthekindofthingyouwouldfind"));
+
+        cleanup_test_directory(".quache-test/".to_string());
+    }
+
+    #[test]
+    #[serial]
+    fn test_kv_store_flush_and_restore_from_memory() {
+        let mut kv_store = KVStore::new(3, ".quache-test/".to_string())
+            .expect("Should be able to create KV store");
+        kv_store
+            .put("hey".to_string(), serde_json::Value::from(1), None)
+            .expect("Should be able to call .put without errors"); // goes to shard-2
+        kv_store
+            .put(
+                "thisisaverylongkey".to_string(),
+                serde_json::Value::from(2),
+                None,
+            )
+            .expect("Should be able to call .put without errors"); // goes to shard-1
+        kv_store
+            .put(
+                "notthekindofthingyouwouldfind".to_string(),
+                serde_json::Value::from(3),
+                None,
+            )
+            .expect("Should be able to call .put without errors"); // goes to shard-0
+        kv_store.to_disk().expect("Should be able to flush to disk");
+        let shard_dimensions = kv_store
+            .shard_dimensions
+            .read()
+            .expect("Should be able to acquire read lock");
+        let shard_nums: Vec<usize> = vec![0, 1, 2];
+        for i in &shard_nums {
+            match shard_dimensions.get(i) {
+                Some(d) => {
+                    assert_eq!(*d, 1);
+                }
+                None => {
+                    eprintln!("No dimension found for shard {:?}", i);
+                    assert!(false); // fail here
+                }
+            }
+        }
+        let kv_store_1 = KVStore::new_from_disk(3, ".quache-test/".to_string())
+            .expect("Should be able to create the KV Store from disk");
+
+        assert_eq!(
+            kv_store_1.shards[2]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        assert_eq!(
+            kv_store_1.shards[1]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        assert_eq!(
+            kv_store_1.shards[0]
+                .get_length()
+                .expect("Should be able to get length"),
+            1
+        );
+        let data_2 = kv_store_1.shards[2]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data_2.contains_key("hey"));
+        let data_1 = kv_store_1.shards[1]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data_1.contains_key("thisisaverylongkey"));
+
+        let data_0 = kv_store_1.shards[0]
+            .data
+            .read()
+            .expect("Should be able to acquire read lock");
+        assert!(data_0.contains_key("notthekindofthingyouwouldfind"));
+
+        cleanup_test_directory(".quache-test/".to_string());
     }
 }
